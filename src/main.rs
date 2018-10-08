@@ -1,18 +1,19 @@
 #[macro_use]
 extern crate crossbeam_channel as channel;
 extern crate parking_lot;
+extern crate fnv;
 
 use channel::{Receiver, Sender};
 use parking_lot::RwLock;
 use service::{Request, Service};
-use std::collections::HashMap;
+use fnv::FnvHashMap;
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 fn main() {
-    let shared = Arc::new(RwLock::new(HashMap::new()));
+    let shared = Arc::new(RwLock::new(FnvHashMap::default()));
     let (pubsub_handle, pubshb_controller) = PubsubService::default().start("pubsub service");
 
     let (simple_handle, simple_controller) =
@@ -62,7 +63,7 @@ type Task1Arguments = (String, bool);
 struct SimpleService {
     pubsub: PubsubController,
     new_tx_receiver: Receiver<()>,
-    shared: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    shared: Arc<RwLock<FnvHashMap<String, Vec<String>>>>,
 }
 
 #[derive(Clone)]
@@ -120,7 +121,7 @@ impl SimpleService {
     pub fn new(
         pubsub: PubsubController,
         new_tx_name: &str,
-        shared: Arc<RwLock<HashMap<String, Vec<String>>>>,
+        shared: Arc<RwLock<FnvHashMap<String, Vec<String>>>>,
     ) -> SimpleService {
         let new_tx_receiver = pubsub.subscribe_net_tx(new_tx_name.to_string());
         SimpleService {
@@ -181,11 +182,7 @@ type MsgSwitchFork = Arc<Vec<u32>>;
 type PubsubRegister<M> = Sender<Request<(String, usize), Receiver<M>>>;
 
 #[derive(Default)]
-struct PubsubService {
-    new_tx_subscribers: HashMap<String, Sender<MsgNewTx>>,
-    new_tip_subscribers: HashMap<String, Sender<MsgNewTip>>,
-    switch_fork_subscribers: HashMap<String, Sender<MsgSwitchFork>>,
-}
+struct PubsubService {}
 
 #[derive(Clone)]
 struct PubsubController {
@@ -210,6 +207,10 @@ impl Service for PubsubService {
         let (event2_sender, event2_receiver) = channel::bounded::<MsgNewTip>(128);
         let (event3_sender, event3_receiver) = channel::bounded::<MsgSwitchFork>(128);
 
+        let mut new_tx_subscribers = FnvHashMap::default();
+        let mut new_tip_subscribers = FnvHashMap::default();
+        let mut switch_fork_subscribers = FnvHashMap::default();
+
         let thread_builder = thread::Builder::new().name(thread_name.to_string());
         let join_handle = thread_builder
             .spawn(move || loop {
@@ -222,7 +223,7 @@ impl Service for PubsubService {
                         Some(Request { responsor, arguments: (name, capacity) }) => {
                             println!("Register event1 {:?}", name);
                             let (sender, receiver) = channel::bounded::<MsgNewTx>(capacity);
-                            self.new_tx_subscribers.insert(name, sender);
+                            new_tx_subscribers.insert(name, sender);
                             responsor.send(receiver);
                         },
                         None => println!("Register 1 channel is closed"),
@@ -231,7 +232,7 @@ impl Service for PubsubService {
                         Some(Request { responsor, arguments: (name, capacity)}) => {
                             println!("Register event2 {:?}", name);
                             let (sender, receiver) = channel::bounded::<MsgNewTip>(capacity);
-                            self.new_tip_subscribers.insert(name, sender);
+                            new_tip_subscribers.insert(name, sender);
                             responsor.send(receiver);
                         },
                         None => println!("Register 2 channel is closed"),
@@ -240,7 +241,7 @@ impl Service for PubsubService {
                         Some(Request { responsor, arguments: (name, capacity)}) => {
                             println!("Register event3 {:?}", name);
                             let (sender, receiver) = channel::bounded::<MsgSwitchFork>(capacity);
-                            self.switch_fork_subscribers.insert(name, sender);
+                            switch_fork_subscribers.insert(name, sender);
                             responsor.send(receiver);
                         },
                         None => println!("Register 3 channel is closed"),
@@ -249,7 +250,7 @@ impl Service for PubsubService {
                     recv(event1_receiver, msg) => match msg {
                         Some(msg) => {
                             println!("event new tx {:?}", msg);
-                            for (name, subscriber) in &self.new_tx_subscribers {
+                            for (name, subscriber) in &new_tx_subscribers {
                                 println!("Send new tx to: {}", name);
                                 subscriber.send(msg.clone());
                             }
@@ -259,7 +260,7 @@ impl Service for PubsubService {
                     recv(event2_receiver, msg) => match msg {
                         Some(msg) => {
                             println!("event new tip {:?}", msg);
-                            for subscriber in self.new_tip_subscribers.values() {
+                            for subscriber in new_tip_subscribers.values() {
                                 subscriber.send(msg.clone());
                             }
                         },
@@ -268,7 +269,7 @@ impl Service for PubsubService {
                     recv(event3_receiver, msg) => match msg {
                         Some(msg) => {
                             println!("event switch fork {:?}", msg);
-                            for subscriber in self.switch_fork_subscribers.values() {
+                            for subscriber in switch_fork_subscribers.values() {
                                 subscriber.send(msg.clone());
                             }
                         },
