@@ -2,6 +2,7 @@
 extern crate crossbeam_channel as channel;
 extern crate parking_lot;
 
+use channel::{Receiver, Sender};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,11 +37,11 @@ fn main() {
 }
 
 mod worker {
-    use super::channel;
+    use super::channel::Sender;
     use std::thread::JoinHandle;
 
     pub struct RequestTask<A, R> {
-        pub responsor: channel::Sender<R>,
+        pub responsor: Sender<R>,
         pub arguments: A,
     }
 
@@ -59,22 +60,22 @@ type Task1Arguments = (String, bool);
 
 struct SimpleWorker {
     pubsub: PubsubController,
-    new_tx_receiver: channel::Receiver<()>,
+    new_tx_receiver: Receiver<()>,
     shared: Arc<RwLock<HashMap<String, Vec<String>>>>,
 }
 
 #[derive(Clone)]
 struct SimpleController {
-    task1_sender: channel::Sender<RequestTask<Task1Arguments, Task1ResponseValue>>,
-    task2_sender: channel::Sender<(String, u64)>,
+    task1_sender: Sender<RequestTask<Task1Arguments, Task1ResponseValue>>,
+    task2_sender: Sender<(String, u64)>,
 }
 
 impl Worker for SimpleWorker {
     type Controller = SimpleController;
 
     fn start<S: ToString>(self, thread_name: S) -> (JoinHandle<()>, Self::Controller) {
-        let (task1_sender, task1_receiver) = channel::bounded(1024);
-        let (task2_sender, task2_receiver) = channel::bounded(1024);
+        let (task1_sender, task1_receiver) = channel::bounded(128);
+        let (task2_sender, task2_receiver) = channel::bounded(128);
 
         let thread_builder = thread::Builder::new().name(thread_name.to_string());
         let join_handle = thread_builder
@@ -155,7 +156,7 @@ impl SimpleWorker {
 }
 
 impl SimpleController {
-    pub fn send_request(&self, arguments: Task1Arguments) -> channel::Receiver<Task1ResponseValue> {
+    pub fn send_request(&self, arguments: Task1Arguments) -> Receiver<Task1ResponseValue> {
         let (sender, receiver) = channel::bounded(1);
         self.task1_sender.send(RequestTask {
             responsor: sender,
@@ -177,24 +178,24 @@ type MsgSignal = ();
 type MsgNewTx = ();
 type MsgNewTip = Arc<Vec<u8>>;
 type MsgSwitchFork = Arc<Vec<u32>>;
-type PubsubRegister<M> = channel::Sender<RequestTask<(String, channel::Sender<M>), SubscribeAck>>;
+type PubsubRegister<M> = Sender<RequestTask<(String, Sender<M>), SubscribeAck>>;
 
 #[derive(Default)]
 struct PubsubWorker {
-    new_tx_subscribers: HashMap<String, channel::Sender<MsgNewTx>>,
-    new_tip_subscribers: HashMap<String, channel::Sender<MsgNewTip>>,
-    switch_fork_subscribers: HashMap<String, channel::Sender<MsgSwitchFork>>,
+    new_tx_subscribers: HashMap<String, Sender<MsgNewTx>>,
+    new_tip_subscribers: HashMap<String, Sender<MsgNewTip>>,
+    switch_fork_subscribers: HashMap<String, Sender<MsgSwitchFork>>,
 }
 
 #[derive(Clone)]
 struct PubsubController {
-    signal: channel::Sender<MsgSignal>,
+    signal: Sender<MsgSignal>,
     new_tx_register: PubsubRegister<MsgNewTx>,
     new_tip_register: PubsubRegister<MsgNewTip>,
     switch_fork_register: PubsubRegister<MsgSwitchFork>,
-    new_tx_notifier: channel::Sender<MsgNewTx>,
-    new_tip_notifier: channel::Sender<MsgNewTip>,
-    switch_fork_notifier: channel::Sender<MsgSwitchFork>,
+    new_tx_notifier: Sender<MsgNewTx>,
+    new_tip_notifier: Sender<MsgNewTip>,
+    switch_fork_notifier: Sender<MsgSwitchFork>,
 }
 
 impl Worker for PubsubWorker {
@@ -289,11 +290,11 @@ impl Worker for PubsubWorker {
 }
 
 impl PubsubController {
-    pub fn stop(&self) {
+    pub fn stop(self) {
         self.signal.send(());
     }
 
-    pub fn subscribe_net_tx<S: ToString>(&self, name: S) -> channel::Receiver<MsgNewTx> {
+    pub fn subscribe_net_tx<S: ToString>(&self, name: S) -> Receiver<MsgNewTx> {
         let name = name.to_string();
         let (responsor, response) = channel::bounded(1);
         let (event1_sender, event1_receiver) = channel::bounded::<MsgNewTx>(128);
@@ -305,7 +306,7 @@ impl PubsubController {
         let _ = response.recv().expect("Subscribe new tx failed");
         event1_receiver
     }
-    pub fn subscribe_net_tip<S: ToString>(&self, name: S) -> channel::Receiver<MsgNewTip> {
+    pub fn subscribe_net_tip<S: ToString>(&self, name: S) -> Receiver<MsgNewTip> {
         let name = name.to_string();
         let (responsor, response) = channel::bounded(1);
         let (event2_sender, event2_receiver) = channel::bounded::<MsgNewTip>(128);
@@ -317,7 +318,7 @@ impl PubsubController {
         let _ = response.recv().expect("Subscribe new tip failed");
         event2_receiver
     }
-    pub fn subscribe_switch_fork<S: ToString>(&self, name: S) -> channel::Receiver<MsgSwitchFork> {
+    pub fn subscribe_switch_fork<S: ToString>(&self, name: S) -> Receiver<MsgSwitchFork> {
         let name = name.to_string();
         let (responsor, response) = channel::bounded(1);
         let (event3_sender, event3_receiver) = channel::bounded::<MsgSwitchFork>(128);
