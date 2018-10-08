@@ -5,3 +5,4 @@ authors = ["Qian Linfeng <thewawar@gmail.com>"]
 
 [dependencies]
 crossbeam-channel = "0.2"
+parking_lot = "0.6"
