@@ -4,21 +4,22 @@ extern crate parking_lot;
 
 use channel::{Receiver, Sender};
 use parking_lot::RwLock;
+use service::{Request, Service};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use worker::{RequestTask, Worker};
 
 fn main() {
     let shared = Arc::new(RwLock::new(HashMap::new()));
-    let (pubsub_handle, pubshb_controller) = PubsubWorker::default().start("pubsub worker");
+    let (pubsub_handle, pubshb_controller) = PubsubService::default().start("pubsub service");
 
     let (simple_handle, simple_controller) =
-        SimpleWorker::new(pubshb_controller.clone(), "simple", Arc::clone(&shared)).start("simple");
+        SimpleService::new(pubshb_controller.clone(), "simple", Arc::clone(&shared))
+            .start("simple");
     let (simple2_handle, simple2_controller) =
-        SimpleWorker::new(pubshb_controller.clone(), "simple2", shared).start("simple2");
+        SimpleService::new(pubshb_controller.clone(), "simple2", shared).start("simple2");
 
     let response =
         simple_controller.send_request(("this is a request/response task".to_string(), true));
@@ -29,25 +30,25 @@ fn main() {
     simple_controller.do_task2("this is event 1 to send".to_string(), 111);
     simple2_controller.do_task2("this is event 2 to send".to_string(), 222);
 
-    simple_handle.join().expect("join simple worker failed");
-    simple2_handle.join().expect("join simple2 worker failed");
+    simple_handle.join().expect("join simple service failed");
+    simple2_handle.join().expect("join simple2 service failed");
     pubshb_controller.stop();
-    pubsub_handle.join().expect("join pubsub worker failed");
+    pubsub_handle.join().expect("join pubsub service failed");
     println!(">>> DONE!");
 }
 
-mod worker {
+mod service {
     use super::channel::Sender;
     use std::thread::JoinHandle;
 
-    pub struct RequestTask<A, R> {
+    pub struct Request<A, R> {
         pub responsor: Sender<R>,
         pub arguments: A,
     }
 
-    pub trait Worker {
+    pub trait Service {
         type Controller;
-        // Worker's main loop
+        // Service's main loop
         fn start<S: ToString>(self, thread_name: S) -> (JoinHandle<()>, Self::Controller);
     }
 }
@@ -58,7 +59,7 @@ mod worker {
 type Task1ResponseValue = u32;
 type Task1Arguments = (String, bool);
 
-struct SimpleWorker {
+struct SimpleService {
     pubsub: PubsubController,
     new_tx_receiver: Receiver<()>,
     shared: Arc<RwLock<HashMap<String, Vec<String>>>>,
@@ -66,11 +67,11 @@ struct SimpleWorker {
 
 #[derive(Clone)]
 struct SimpleController {
-    task1_sender: Sender<RequestTask<Task1Arguments, Task1ResponseValue>>,
+    task1_sender: Sender<Request<Task1Arguments, Task1ResponseValue>>,
     task2_sender: Sender<(String, u64)>,
 }
 
-impl Worker for SimpleWorker {
+impl Service for SimpleService {
     type Controller = SimpleController;
 
     fn start<S: ToString>(self, thread_name: S) -> (JoinHandle<()>, Self::Controller) {
@@ -103,7 +104,7 @@ impl Worker for SimpleWorker {
                         None => println!("new tx notify channel is closed"),
                     }
                 }
-            }).expect("Start dummy worker failed");
+            }).expect("Start dummy service failed");
 
         (
             join_handle,
@@ -115,22 +116,22 @@ impl Worker for SimpleWorker {
     }
 }
 
-impl SimpleWorker {
+impl SimpleService {
     pub fn new(
         pubsub: PubsubController,
         new_tx_name: &str,
         shared: Arc<RwLock<HashMap<String, Vec<String>>>>,
-    ) -> SimpleWorker {
+    ) -> SimpleService {
         let new_tx_receiver = pubsub.subscribe_net_tx(new_tx_name.to_string());
-        SimpleWorker {
+        SimpleService {
             new_tx_receiver,
             pubsub,
             shared,
         }
     }
 
-    pub fn handle_request(&self, request: RequestTask<Task1Arguments, Task1ResponseValue>) {
-        let RequestTask {
+    pub fn handle_request(&self, request: Request<Task1Arguments, Task1ResponseValue>) {
+        let Request {
             responsor,
             arguments,
         } = request;
@@ -151,14 +152,14 @@ impl SimpleWorker {
     }
 
     pub fn handle_new_tx(&self) {
-        println!("new tx received in SimpleWorker");
+        println!("new tx received in SimpleService");
     }
 }
 
 impl SimpleController {
     pub fn send_request(&self, arguments: Task1Arguments) -> Receiver<Task1ResponseValue> {
         let (sender, receiver) = channel::bounded(1);
-        self.task1_sender.send(RequestTask {
+        self.task1_sender.send(Request {
             responsor: sender,
             arguments,
         });
@@ -173,15 +174,14 @@ impl SimpleController {
 /* ================ */
 /* ==== PubSub ==== */
 /* ================ */
-type SubscribeAck = ();
 type MsgSignal = ();
 type MsgNewTx = ();
 type MsgNewTip = Arc<Vec<u8>>;
 type MsgSwitchFork = Arc<Vec<u32>>;
-type PubsubRegister<M> = Sender<RequestTask<(String, Sender<M>), SubscribeAck>>;
+type PubsubRegister<M> = Sender<Request<(String, usize), Receiver<M>>>;
 
 #[derive(Default)]
-struct PubsubWorker {
+struct PubsubService {
     new_tx_subscribers: HashMap<String, Sender<MsgNewTx>>,
     new_tip_subscribers: HashMap<String, Sender<MsgNewTip>>,
     switch_fork_subscribers: HashMap<String, Sender<MsgSwitchFork>>,
@@ -198,7 +198,7 @@ struct PubsubController {
     switch_fork_notifier: Sender<MsgSwitchFork>,
 }
 
-impl Worker for PubsubWorker {
+impl Service for PubsubService {
     type Controller = PubsubController;
 
     fn start<S: ToString>(mut self, thread_name: S) -> (JoinHandle<()>, Self::Controller) {
@@ -219,26 +219,29 @@ impl Worker for PubsubWorker {
                     }
 
                     recv(register1_receiver, msg) => match msg {
-                        Some(RequestTask { responsor, arguments: (name, sender) }) => {
+                        Some(Request { responsor, arguments: (name, capacity) }) => {
                             println!("Register event1 {:?}", name);
+                            let (sender, receiver) = channel::bounded::<MsgNewTx>(capacity);
                             self.new_tx_subscribers.insert(name, sender);
-                            responsor.send(());
+                            responsor.send(receiver);
                         },
                         None => println!("Register 1 channel is closed"),
                     }
                     recv(register2_receiver, msg) => match msg {
-                        Some(RequestTask { responsor, arguments: (name, sender)}) => {
+                        Some(Request { responsor, arguments: (name, capacity)}) => {
                             println!("Register event2 {:?}", name);
+                            let (sender, receiver) = channel::bounded::<MsgNewTip>(capacity);
                             self.new_tip_subscribers.insert(name, sender);
-                            responsor.send(());
+                            responsor.send(receiver);
                         },
                         None => println!("Register 2 channel is closed"),
                     }
                     recv(register3_receiver, msg) => match msg {
-                        Some(RequestTask { responsor, arguments: (name, sender)}) => {
+                        Some(Request { responsor, arguments: (name, capacity)}) => {
                             println!("Register event3 {:?}", name);
+                            let (sender, receiver) = channel::bounded::<MsgSwitchFork>(capacity);
                             self.switch_fork_subscribers.insert(name, sender);
-                            responsor.send(());
+                            responsor.send(receiver);
                         },
                         None => println!("Register 3 channel is closed"),
                     }
@@ -272,7 +275,7 @@ impl Worker for PubsubWorker {
                         None => println!("event 3 channel is closed"),
                     }
                 }
-            }).expect("Start pubsub worker failed");
+            }).expect("Start pubsub service failed");
 
         (
             join_handle,
@@ -295,40 +298,31 @@ impl PubsubController {
     }
 
     pub fn subscribe_net_tx<S: ToString>(&self, name: S) -> Receiver<MsgNewTx> {
-        let name = name.to_string();
         let (responsor, response) = channel::bounded(1);
-        let (event1_sender, event1_receiver) = channel::bounded::<MsgNewTx>(128);
-        self.new_tx_register.send(RequestTask {
+        self.new_tx_register.send(Request {
             responsor,
-            arguments: (name, event1_sender),
+            arguments: (name.to_string(), 128),
         });
         // Ensure the subscriber is registered.
-        let _ = response.recv().expect("Subscribe new tx failed");
-        event1_receiver
+        response.recv().expect("Subscribe new tx failed")
     }
     pub fn subscribe_net_tip<S: ToString>(&self, name: S) -> Receiver<MsgNewTip> {
-        let name = name.to_string();
         let (responsor, response) = channel::bounded(1);
-        let (event2_sender, event2_receiver) = channel::bounded::<MsgNewTip>(128);
-        self.new_tip_register.send(RequestTask {
+        self.new_tip_register.send(Request {
             responsor,
-            arguments: (name, event2_sender),
+            arguments: (name.to_string(), 128),
         });
         // Ensure the subscriber is registered.
-        let _ = response.recv().expect("Subscribe new tip failed");
-        event2_receiver
+        response.recv().expect("Subscribe new tip failed")
     }
     pub fn subscribe_switch_fork<S: ToString>(&self, name: S) -> Receiver<MsgSwitchFork> {
-        let name = name.to_string();
         let (responsor, response) = channel::bounded(1);
-        let (event3_sender, event3_receiver) = channel::bounded::<MsgSwitchFork>(128);
-        self.switch_fork_register.send(RequestTask {
+        self.switch_fork_register.send(Request {
             responsor,
-            arguments: (name, event3_sender),
+            arguments: (name.to_string(), 128),
         });
         // Ensure the subscriber is registered.
-        let _ = response.recv().expect("Subscribe switch fork failed");
-        event3_receiver
+        response.recv().expect("Subscribe switch fork failed")
     }
 
     pub fn notify_new_tx(&self) {
