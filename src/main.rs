@@ -60,17 +60,17 @@ type Task2Arguments = (String, u64);
 
 struct SimpleWorker {
     new_tx_receiver: channel::Receiver<()>,
-    pubsub: PubsubWorkerController,
+    pubsub: PubsubController,
 }
 
 #[derive(Clone)]
-struct SimpleWorkerController {
+struct SimpleController {
     task1_sender: channel::Sender<RequestTask<Task1Arguments, Task1ResponseValue>>,
     task2_sender: channel::Sender<Task2Arguments>,
 }
 
 impl Worker for SimpleWorker {
-    type Controller = SimpleWorkerController;
+    type Controller = SimpleController;
 
     fn start<S: ToString>(self, thread_name: S) -> (thread::JoinHandle<()>, Self::Controller) {
         let (task1_sender, task1_receiver) = channel::bounded(1024);
@@ -104,7 +104,7 @@ impl Worker for SimpleWorker {
 
         (
             join_handle,
-            SimpleWorkerController {
+            SimpleController {
                 task1_sender,
                 task2_sender,
             }
@@ -113,7 +113,7 @@ impl Worker for SimpleWorker {
 }
 
 impl SimpleWorker {
-    pub fn new(pubsub: PubsubWorkerController, new_tx_name: &str) -> SimpleWorker {
+    pub fn new(pubsub: PubsubController, new_tx_name: &str) -> SimpleWorker {
         let new_tx_receiver = pubsub.subscribe_net_tx(new_tx_name.to_string());
         SimpleWorker { new_tx_receiver, pubsub }
     }
@@ -137,7 +137,7 @@ impl SimpleWorker {
     }
 }
 
-impl SimpleWorkerController {
+impl SimpleController {
     pub fn send_request(&self, arguments: Task1Arguments) -> channel::Receiver<Task1ResponseValue> {
         let (sender, receiver) = channel::bounded(1);
         self.task1_sender.send(RequestTask {
@@ -161,7 +161,7 @@ impl SimpleWorkerController {
 struct PubsubWorker {}
 
 #[derive(Clone)]
-struct PubsubWorkerController {
+struct PubsubController {
     signal: channel::Sender<()>,
     new_tx_register: channel::Sender<RequestTask<(String, channel::Sender<()>), ()>>,
     new_tip_register: channel::Sender<RequestTask<(String, channel::Sender<Arc<Vec<u8>>>), ()>>,
@@ -172,7 +172,7 @@ struct PubsubWorkerController {
 }
 
 impl Worker for PubsubWorker {
-    type Controller = PubsubWorkerController;
+    type Controller = PubsubController;
 
     fn start<S: ToString>(self, thread_name: S) -> (thread::JoinHandle<()>, Self::Controller) {
         let (signal_sender, signal_receiver) = channel::bounded::<()>(1);
@@ -253,7 +253,7 @@ impl Worker for PubsubWorker {
 
         (
             join_handle,
-            PubsubWorkerController {
+            PubsubController {
                 new_tx_register: register1_sender,
                 new_tip_register: register2_sender,
                 switch_fork_register: register3_sender,
@@ -266,7 +266,7 @@ impl Worker for PubsubWorker {
     }
 }
 
-impl PubsubWorkerController {
+impl PubsubController {
     pub fn stop(&self) {
         self.signal.send(());
     }
