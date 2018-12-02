@@ -1,12 +1,12 @@
 #[macro_use]
 extern crate crossbeam_channel as channel;
-extern crate parking_lot;
 extern crate fnv;
+extern crate parking_lot;
 
 use channel::{Receiver, Sender};
+use fnv::FnvHashMap;
 use parking_lot::RwLock;
 use service::{Request, Service};
-use fnv::FnvHashMap;
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
@@ -105,7 +105,8 @@ impl Service for SimpleService {
                         None => println!("new tx notify channel is closed"),
                     }
                 }
-            }).expect("Start dummy service failed");
+            })
+            .expect("Start dummy service failed");
 
         (
             join_handle,
@@ -276,7 +277,8 @@ impl Service for PubsubService {
                         None => println!("event 3 channel is closed"),
                     }
                 }
-            }).expect("Start pubsub service failed");
+            })
+            .expect("Start pubsub service failed");
 
         (
             join_handle,
